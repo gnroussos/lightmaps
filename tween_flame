@@ -1,0 +1,497 @@
+// ------------------------------------------------
+// ver. 3.3
+// flickering flame polygon version
+// with textures. 8 models simulation of airflow 
+// + texture flame
+// light mip-maps
+// ------------------------------------------------
+
+#include "mydefs.h"
+
+//-------- extern global vars --------
+extern WORD curPos;
+extern WORD prevPos;
+extern HBITMAP dirBitmaps[NUM_DIR];
+extern HINSTANCE hInst;
+extern char	path[];
+extern DLGOPTIONS	opts;									
+
+//-------- global vars directx --------
+
+LPDIRECT3D9				g_pD3D=NULL;				//D3D device
+LPDIRECT3DDEVICE9		h_pd3dDevice=NULL;			//rendering device
+
+LPDIRECT3DVERTEXBUFFER9 pVBFlameModels[NUM_DIR];	//array that holds flame shapes
+LPDIRECT3DVERTEXBUFFER9 pVBFlameRender=NULL;		//VB for target flame 
+
+LPDIRECT3DVERTEXBUFFER9 pVBBackWall=NULL;
+LPDIRECT3DINDEXBUFFER9	pFlameIB=NULL;				//universal index buffer (same for all)
+
+LPDIRECT3DTEXTURE9		pTextArray[NUM_OF_TEX_SET * NUM_DIR];		//textures array
+LPDIRECT3DTEXTURE9		pTextLightArray[NUM_OF_LIGHT_SET * NUM_DIR]; //light maps textures
+LPDIRECT3DTEXTURE9		pTextFlame=NULL;							//flame texture
+
+LPDIRECT3DTEXTURE9		pTemp=NULL;
+
+DWORD dwNumFlameVertices=0;
+DWORD dwNumFlameFaces=0;
+
+CDXUTTimer *pTimer;									//timer 
+
+// ------------------------------------------------
+// Initializes D3D
+// ------------------------------------------------
+
+HRESULT InitD3D(HWND hWnd)
+{
+	D3DDISPLAYMODE d3ddm;
+	D3DPRESENT_PARAMETERS d3dpp;
+
+	if ((g_pD3D=Direct3DCreate9(D3D_SDK_VERSION))==NULL)		//create D3D object
+		return E_FAIL;
+	
+	if (FAILED(g_pD3D->GetAdapterDisplayMode(D3DADAPTER_DEFAULT,&d3ddm)))	//get current
+		return E_FAIL;														//display mode
+
+	ZeroMemory(&d3dpp,sizeof(d3dpp));
+	d3dpp.Windowed=TRUE;
+	d3dpp.SwapEffect=D3DSWAPEFFECT_DISCARD;
+	d3dpp.BackBufferFormat=d3ddm.Format;
+	d3dpp.EnableAutoDepthStencil=TRUE;
+	d3dpp.AutoDepthStencilFormat=D3DFMT_D16;
+
+	if (FAILED(g_pD3D->CreateDevice(D3DADAPTER_DEFAULT,D3DDEVTYPE_HAL,hWnd,	//create rendering device
+									D3DCREATE_HARDWARE_VERTEXPROCESSING,
+									&d3dpp,&h_pd3dDevice)))
+		return E_FAIL;
+	
+//turn on/off rendering states
+	h_pd3dDevice->SetRenderState(D3DRS_CULLMODE,D3DCULL_CCW);
+	h_pd3dDevice->SetRenderState(D3DRS_LIGHTING,FALSE);
+	h_pd3dDevice->SetRenderState(D3DRS_ZENABLE,TRUE);
+	
+	h_pd3dDevice->SetTextureStageState(0,D3DTSS_TEXCOORDINDEX,0);
+	h_pd3dDevice->SetTextureStageState(1,D3DTSS_TEXCOORDINDEX,0);
+
+	h_pd3dDevice->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);
+	h_pd3dDevice->SetSamplerState(0,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR);
+	
+	h_pd3dDevice->SetSamplerState(0,D3DSAMP_ADDRESSU,D3DTADDRESS_BORDER);
+	h_pd3dDevice->SetSamplerState(0,D3DSAMP_ADDRESSV,D3DTADDRESS_BORDER);
+	h_pd3dDevice->SetSamplerState(0,D3DSAMP_BORDERCOLOR,0xffffffff);
+
+//prepare for multitexturing - set standard texture state for stages 0 & 1 
+	h_pd3dDevice->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1);
+	h_pd3dDevice->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_TEXTURE);
+	h_pd3dDevice->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_DISABLE);
+	
+	h_pd3dDevice->SetTextureStageState(1,D3DTSS_COLORARG1,D3DTA_TEXTURE);
+	h_pd3dDevice->SetTextureStageState(1,D3DTSS_COLORARG2,D3DTA_CURRENT);
+	h_pd3dDevice->SetTextureStageState(1,D3DTSS_ALPHAOP,D3DTOP_DISABLE );
+	
+	return S_OK;
+}
+
+// ------------------------------------------------
+// setup view & projection matrices
+// ------------------------------------------------
+
+void SetupMatrices()
+{
+	D3DXMATRIXA16 matProj,matView;
+	D3DSURFACE_DESC d3dsdBackBuffer;
+
+	D3DXMatrixLookAtLH(&matView,&D3DXVECTOR3(0.0f,2.0f,-3.5f ),
+                                &D3DXVECTOR3(0.0f,0.0f,0.0f ),
+                                &D3DXVECTOR3(0.0f,1.0f,0.0f ) );
+    h_pd3dDevice->SetTransform(D3DTS_VIEW,&matView);
+
+    LPDIRECT3DSURFACE9 pBackBuffer;								//get backbuffer dimensions
+    h_pd3dDevice->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,&pBackBuffer );
+    pBackBuffer->GetDesc(&d3dsdBackBuffer);
+    pBackBuffer->Release();
+
+	float fAspect=(float)d3dsdBackBuffer.Width / (float) d3dsdBackBuffer.Height;
+	D3DXMatrixOrthoLH(&matProj,12.0f,9.0f,-100.0f,100.0f);
+//	D3DXMatrixPerspectiveFovLH(&matProj,D3DX_PI/3,fAspect,0.0f,1000.0f);
+    h_pd3dDevice->SetTransform(D3DTS_PROJECTION, &matProj );
+}
+
+// ------------------------------------------------
+// create geometry
+// ------------------------------------------------
+
+void ConstructWalls()
+{
+	CUSTOMVERTEX *pDest;
+
+	h_pd3dDevice->CreateVertexBuffer(4 * sizeof(CUSTOMVERTEX),
+                                     0,0,D3DPOOL_MANAGED,&pVBBackWall,NULL);
+	
+	pVBBackWall->Lock(0,0,(void**)&pDest,0);		//back wall geometry
+    
+	pDest[0].p = D3DXVECTOR3(0.0f,0.0f,0.0f);
+	pDest[0].c = 0xff00ff00;
+	pDest[0].tu = 0.0f;
+	pDest[0].tv = 1.0f;
+
+	pDest[1].p=D3DXVECTOR3(0.0f,10.0f,0.0f);
+	pDest[1].c = 0xff00ff00;
+	pDest[1].tu=0.0f;
+	pDest[1].tv=0.0f;
+
+	pDest[2].p=D3DXVECTOR3(10.0f,0.0f,0.0f);
+	pDest[2].c = 0xff00ff00;
+	pDest[2].tu=1.0f;
+	pDest[2].tv=1.0f;
+
+	pDest[3].p=D3DXVECTOR3(10.0f,10.0f,0.0f);
+	pDest[3].c = 0xff00ff00;
+	pDest[3].tu=1.0f;
+	pDest[3].tv=0.0f;
+	
+	pVBBackWall->Unlock();  
+}
+
+
+// ------------------------------------------------
+// Initialize objects & textures 
+// ------------------------------------------------
+
+// remove dependencies from custom file and move files to local folder
+// use D3DXCreateTextureFromFileEx for textures
+// still depended DXUTMesh.h for meshes .x files
+// still depended DXUTmisc.h CDXUTTimer class for timing
+
+HRESULT InitObjects()
+{
+	LPDIRECT3DVERTEXBUFFER9 pMeshSourceVB;
+	LPDIRECT3DINDEXBUFFER9  pMeshSourceIB;
+	CUSTOMVERTEX2			*pSrc;
+    CUSTOMVERTEX2			*pDst;	
+    CDXUTMesh				flameMeshArray[NUM_DIR];
+	DWORD i;
+	
+	char fileName[40];
+
+//load bitmaps as resource
+
+	pTimer = new CDXUTTimer();									//initialize timer 
+	pTimer->Start();
+	
+	for (i=0;i<NUM_DIR;i++)
+		dirBitmaps[i]=(HBITMAP)LoadImage(hInst,MAKEINTRESOURCE(IDB_BITMAP0+i),
+										 IMAGE_BITMAP,0,0,LR_DEFAULTCOLOR);
+	
+//load textures
+	for (i=0;i<NUM_DIR;i++)
+	{	
+		sprintf(fileName,"%stext_%d.dds",path,i);
+		if (FAILED(D3DXCreateTextureFromFileEx(h_pd3dDevice,(LPCWSTR)fileName,D3DX_DEFAULT,D3DX_DEFAULT,D3DX_FROM_FILE,
+					0,D3DFMT_FROM_FILE,D3DPOOL_DEFAULT,D3DX_DEFAULT,D3DX_DEFAULT,0,NULL,NULL,&pTextArray[i])))
+			return D3DAPPERR_MEDIANOTFOUND;
+		
+//load light-map texture sets
+		sprintf(fileName,"%slight_bright_%d.dds",path,i);
+		if(FAILED(D3DXCreateTextureFromFileEx(h_pd3dDevice,(LPCWSTR)fileName,D3DX_DEFAULT,D3DX_DEFAULT,D3DX_FROM_FILE,
+					0,D3DFMT_FROM_FILE,D3DPOOL_DEFAULT,D3DX_DEFAULT,D3DX_DEFAULT,0,NULL,NULL,&pTextLightArray[i])))
+			return D3DAPPERR_MEDIANOTFOUND;
+
+		sprintf(fileName,"%slight_normal_%d.dds",path,i);
+		if(FAILED(D3DXCreateTextureFromFileEx(h_pd3dDevice,(LPCWSTR)fileName,D3DX_DEFAULT,D3DX_DEFAULT,D3DX_FROM_FILE,
+					0,D3DFMT_FROM_FILE,D3DPOOL_DEFAULT,D3DX_DEFAULT,D3DX_DEFAULT,0,NULL,NULL,&pTextLightArray[NUM_DIR + i])))
+			return D3DAPPERR_MEDIANOTFOUND;
+
+		sprintf(fileName,"%slight_dark_%d.dds",path,i);
+		if(FAILED(D3DXCreateTextureFromFileEx(h_pd3dDevice,(LPCWSTR)fileName,D3DX_DEFAULT,D3DX_DEFAULT,D3DX_FROM_FILE,
+					0,D3DFMT_FROM_FILE,D3DPOOL_DEFAULT,D3DX_DEFAULT,D3DX_DEFAULT,0,NULL,NULL,&pTextLightArray[NUM_DIR *2 + i])))
+			return D3DAPPERR_MEDIANOTFOUND;
+	}
+
+	sprintf(fileName,"%stext_flame.dds",path);
+	if (FAILED(D3DXCreateTextureFromFileEx(h_pd3dDevice,(LPCWSTR)fileName,D3DX_DEFAULT,D3DX_DEFAULT,D3DX_FROM_FILE,
+					0,D3DFMT_FROM_FILE,D3DPOOL_DEFAULT,D3DX_DEFAULT,D3DX_DEFAULT,0,NULL,NULL,&pTextFlame)))
+		return D3DAPPERR_MEDIANOTFOUND;
+	
+//load objects from .x files and set FVF
+	for (i=0;i<NUM_DIR;i++)
+	{
+		sprintf(fileName,"%sfl_%d.x",path,i);
+		if (FAILED(flameMeshArray[i].Create(h_pd3dDevice,(LPCWSTR)fileName)))
+			return D3DAPPERR_MEDIANOTFOUND;
+		flameMeshArray[i].SetFVF(h_pd3dDevice,D3DFVF_CUSTOMVERTEX2);
+	}
+	
+//get num of verticecs & faces (same for all)
+	dwNumFlameVertices=flameMeshArray[0].GetSysMemMesh()->GetNumVertices();
+	dwNumFlameFaces=flameMeshArray[0].GetSysMemMesh()->GetNumFaces();
+
+//create &fill vertex buffers
+	
+	h_pd3dDevice->CreateVertexBuffer(dwNumFlameVertices * sizeof(CUSTOMVERTEX2),
+                                     0,0,D3DPOOL_MANAGED,&pMeshSourceVB,NULL);
+	h_pd3dDevice->CreateVertexBuffer(dwNumFlameVertices * sizeof(CUSTOMVERTEX2),
+                                     0,0,D3DPOOL_MANAGED,&pVBFlameRender,NULL);
+	h_pd3dDevice->CreateIndexBuffer( dwNumFlameFaces * 3 * sizeof(WORD),
+                                      D3DUSAGE_WRITEONLY,
+                                      D3DFMT_INDEX16, D3DPOOL_MANAGED,
+                                      &pFlameIB,NULL);
+	
+	for (i=0;i<NUM_DIR;i++)
+	{
+		h_pd3dDevice->CreateVertexBuffer(dwNumFlameVertices * sizeof(CUSTOMVERTEX2),
+										 0,0,D3DPOOL_MANAGED,&pVBFlameModels[i],NULL);
+		flameMeshArray[i].GetSysMemMesh()->GetVertexBuffer(&pMeshSourceVB);
+		pMeshSourceVB->Lock(0,0,(void**)&pSrc,0);
+		pVBFlameModels[i]->Lock(0,0,(void**)&pDst,0);
+		memcpy(pDst,pSrc,dwNumFlameVertices * sizeof(CUSTOMVERTEX2));		
+		pVBFlameModels[i]->Unlock();
+		pMeshSourceVB->Unlock();
+		pMeshSourceVB->Release();
+	}
+	
+	flameMeshArray[0].GetSysMemMesh()->GetIndexBuffer( &pMeshSourceIB );
+    pFlameIB->Lock( 0, 0, (void**)&pDst, 0 );
+    pMeshSourceIB->Lock( 0, 0, (void**)&pSrc, 0 );
+    memcpy( pDst, pSrc, 3 * dwNumFlameFaces * sizeof(WORD) );
+	pFlameIB->Unlock();
+    pMeshSourceIB->Unlock();
+    pMeshSourceIB->Release();
+
+	return S_OK;
+}
+
+// ------------------------------------------------
+// 
+// ------------------------------------------------
+
+void PrepareMultiTexturing(BOOL enable)
+{
+	if (enable)
+		h_pd3dDevice->SetTextureStageState(1,D3DTSS_COLOROP,D3DTOP_MODULATE);
+	else
+		h_pd3dDevice->SetTextureStageState(1,D3DTSS_COLOROP,D3DTOP_DISABLE);
+}
+
+// ------------------------------------------------
+// animate every flame frame
+// ------------------------------------------------
+
+HRESULT FrameMove(float &dirFactor,float &fFreq,WORD &lLvl)
+{		
+	float fWeight1,fWeight2;
+
+	CUSTOMVERTEX2 *pSrc1;
+	CUSTOMVERTEX2 *pSrc2;
+    CUSTOMVERTEX2 *pDst;
+	
+	float fTime = (float)pTimer->GetElapsedTime();
+	float fKickFreq    = opts.speed * fTime;					//4*fTime
+    float fPhase       = fTime / 2.0f;
+    float fBlendWeight = sinf(fKickFreq);
+	
+	fWeight1 = fabsf(fBlendWeight);
+	fWeight2 = 1.0f - fWeight1;
+	dirFactor = fWeight2;
+	fFreq = fKickFreq * fPhase;
+	lLvl = LIGHT_NORMAL;
+
+	if (opts.chBox)
+	{
+		while (1)
+		{
+			if (pTimer->GetElapsedTime()-fTime>0.2f)
+				break;
+		}
+		prevPos = Random(0,8);
+		curPos = Random(0,8);
+		if (opts.enableLightMips)
+			lLvl = Random(0,2);
+	}
+
+	pVBFlameRender->Lock(0,0,(void**)&pDst,0);
+	pVBFlameModels[prevPos]->Lock(0,0,(void**)&pSrc1,0);
+	pVBFlameModels[curPos]->Lock(0,0,(void**)&pSrc2,0);	
+		
+	for (DWORD i=0;i<dwNumFlameVertices;i++)							//actual blending
+	{
+		pDst[i].p  = fWeight1 * pSrc1[i].p  + fWeight2*pSrc2[i].p;
+		pDst[i].n  = fWeight1 * pSrc1[i].n  + fWeight2*pSrc2[i].n;
+		pDst[i].tx = fWeight1 * pSrc1[i].tx + fWeight2*pSrc2[i].tx;
+		pDst[i].ty = fWeight1 * pSrc1[i].ty + fWeight2*pSrc2[i].ty;
+		pDst[i].c=0xffffffff;
+	}
+		
+	pVBFlameRender->Unlock();
+	pVBFlameModels[prevPos]->Unlock();
+	pVBFlameModels[curPos]->Unlock();
+	
+	return S_OK;
+}
+
+// ------------------------------------------------
+// render scene
+// ------------------------------------------------
+
+HRESULT Render()
+{
+	float dir=0.0f,freq=0.0f;
+	WORD index,lightIndex,lightLevel;
+	
+	h_pd3dDevice->Clear(0,NULL,D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER,
+						D3DCOLOR_XRGB(0,0,0),1.0f,0);
+
+    h_pd3dDevice->BeginScene();
+		
+	FrameMove(dir,freq,lightLevel);
+	TransformScene();
+
+// determine texture maps
+	if (dir <= 0.3f)
+		index = prevPos;
+	else if (dir >= 0.6f)
+		index = curPos;
+	else
+		index = APNEA;
+	
+	lightIndex = lightLevel * NUM_DIR + index;
+	index+= opts.texIndex * NUM_DIR;
+	if (opts.texSet == TEX_LIGHTMAP)
+		h_pd3dDevice->SetTexture(0,pTextLightArray[lightIndex]);
+	else
+		h_pd3dDevice->SetTexture(0,pTextArray[index]);
+
+//Render the wall
+	if (opts.enableLightMap)
+		h_pd3dDevice->SetTexture(1,pTextLightArray[lightIndex]);	
+
+	h_pd3dDevice->SetFVF(D3DFVF_CUSTOMVERTEX);	
+	h_pd3dDevice->SetStreamSource(0,pVBBackWall,0,sizeof(CUSTOMVERTEX));
+    h_pd3dDevice->DrawPrimitive(D3DPT_TRIANGLESTRIP,0,2);
+
+//Render the flame
+	TransformFlame(freq);
+
+	h_pd3dDevice->SetTexture(0,pTextFlame);
+	h_pd3dDevice->SetTexture(1,NULL);
+
+	h_pd3dDevice->SetFVF(D3DFVF_CUSTOMVERTEX2);	
+	h_pd3dDevice->SetStreamSource(0,pVBFlameRender,0,sizeof(CUSTOMVERTEX2));
+	h_pd3dDevice->SetIndices(pFlameIB);
+    h_pd3dDevice->DrawIndexedPrimitive(D3DPT_TRIANGLELIST,0,0,dwNumFlameVertices,
+                                       0,dwNumFlameFaces);
+	h_pd3dDevice->EndScene();
+
+// Present the backbuffer contents to the display
+    h_pd3dDevice->Present( NULL, NULL, NULL, NULL );
+	
+	return S_OK;
+}
+
+// ------------------------------------------------
+// setup world matrix for flame
+// ------------------------------------------------
+
+void TransformFlame(float freq)
+{
+	D3DXMATRIXA16 matWorld,temp;
+	D3DXMatrixIdentity(&matWorld);
+	D3DXMatrixScaling(&matWorld,0.023f,0.023f,0.023f);
+//	D3DXMatrixRotationZ(&temp,D3DXToRadian(freq));
+//	D3DXMatrixMultiply(&matWorld,&matWorld,&temp);
+	D3DXMatrixRotationZ(&temp,D3DXToRadian(180));
+	D3DXMatrixMultiply(&matWorld,&matWorld,&temp);
+	D3DXMatrixRotationX(&temp,D3DXToRadian(-30));
+	D3DXMatrixMultiply(&matWorld,&matWorld,&temp);
+	D3DXMatrixTranslation(&temp,0.0f,-0.48f,-0.4f); //-0.48f - -1.88f
+	D3DXMatrixMultiply(&matWorld,&matWorld,&temp);
+	h_pd3dDevice->SetTransform(D3DTS_WORLD,&matWorld);
+}
+
+// ------------------------------------------------
+// setup world matrix for wall & floor
+// ------------------------------------------------
+
+void TransformScene()
+{
+	D3DXMATRIXA16 matWorld,temp;
+		
+	D3DXMatrixIdentity(&matWorld);
+	D3DXMatrixScaling(&matWorld,1.0f,1.0f,1.0f);
+	D3DXMatrixTranslation(&temp,-5.0f,-5.0f,0.0f);
+	D3DXMatrixMultiply(&matWorld,&matWorld,&temp);
+	h_pd3dDevice->SetTransform(D3DTS_WORLD,&matWorld);
+}
+
+// ------------------------------------------------
+// clean memory at exit
+// ------------------------------------------------
+
+void Clean()
+{
+	if (pTimer)
+		delete pTimer;
+
+	for (DWORD i=0;i<NUM_DIR;i++)
+	{
+		DeleteObject(dirBitmaps[i]);
+
+		pVBFlameModels[i]->Release();
+		pVBFlameModels[i] = NULL;
+
+		
+		if (pTextLightArray[NUM_DIR * 2 + i])
+		{
+			pTextLightArray[NUM_DIR * 2 + i]->Release();
+			pTextLightArray[NUM_DIR * 2 + i] = NULL;
+			
+			pTextLightArray[NUM_DIR + i]->Release();
+			pTextLightArray[NUM_DIR + i] = NULL;
+
+			pTextLightArray[i]->Release();
+			pTextLightArray[i] = NULL;
+
+			pTextArray[i]->Release();
+			pTextArray[i] = NULL;
+
+//			pTextArray[NUM_DIR + i]->Release();
+//			pTextArray[NUM_DIR + i] = NULL;
+		}
+	}
+
+	if (pTextFlame)
+	{
+		pTextFlame->Release();
+		pTextFlame=NULL;
+	}
+
+	if (pVBFlameRender)
+	{
+		pVBFlameRender->Release();
+		pVBFlameRender=NULL;
+	}
+	
+	if (pVBBackWall)
+	{
+		pVBBackWall->Release();
+		pVBBackWall=NULL;
+	}
+
+	if (pFlameIB)
+	{
+		pFlameIB->Release();
+		pFlameIB=NULL;
+	}
+
+	if (h_pd3dDevice)
+	{
+		h_pd3dDevice->Release();
+		h_pd3dDevice=NULL;
+	}
+
+	if (g_pD3D)
+	{
+		g_pD3D->Release();
+		g_pD3D=NULL;
+	}
+}
