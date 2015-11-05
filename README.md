@@ -1,4 +1,4 @@
 # lightmaps
 
-DirectX code that renders the flame lit demo scene from my pHd thesis <strong>"Image Based Flame Lighting"</strong> <br/>
+DirectX code that renders the flame lit demo scene from my Phd thesis <strong>"Image Based Flame Lighting"</strong> <br/>
 It incorporates the light technique described in my paper "Introducing Light Mip-maps for Flame Lightings.
